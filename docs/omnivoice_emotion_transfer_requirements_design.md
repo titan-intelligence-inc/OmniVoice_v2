@@ -447,9 +447,13 @@ for layer_id in layer_ids:
 
 - hidden shape は `[batch, time, dim]` または `[time, dim]` の可能性がある
 - 差分を取る前に時間方向平均を取るか、token alignment を行う
-- 初期実装では時間平均ベクトルでよい
+- **whole-utterance の単純時間平均は最後の手段**。優先順位は以下:
+  1. 同一テキスト読み上げ対 (neutral_ref と emotional_ref が同一発話内容) で frame-level 差分 → 平均
+  2. VAD で有声フレームのみに限定した平均
+  3. whole-utterance 単純平均 (sanity check 用途)
 - layerごとに norm が異なるため、L2 normalize または RMS normalize を行う
 - alpha は小さめから探索する
+- emotion vector / speaker vector の生成パスは差分定義 (どの音声を引いたか) をメタデータとして保存し、再現性を確保する
 
 ---
 
@@ -559,6 +563,16 @@ speaker_threshold = 0.80
 content_error_threshold = 0.20
 quality_threshold = 0.50
 ```
+
+### 評価器信頼性の前提
+
+これらの自動指標と閾値は、**評価器が日本語音声に対して妥当に動くこと**が前提。Phase 0 の spot check (10〜20 サンプルで主観評価との相関を見る) を実施した上で、初期値を補正する。具体的には:
+
+- SER スコアと主観の感情ラベル一致率が低い場合は `emotion_label_score` の重みを下げる
+- speaker encoder が同一話者の感情変化で大きく振れる場合は `speaker_threshold` を緩める、または感情強度ごとに閾値を分ける
+- Whisper CER が neutral 発話でも高めに出る場合は `content_error_threshold` を緩める
+
+評価器の信頼性検証なしに Phase 5 の grid search を回すと、artifact を最適化することになるため、Phase 5 着手の前提条件として明示する。
 
 ---
 
@@ -758,7 +772,30 @@ class Thresholds:
 
 ## 12. 実装ステップ
 
-## Phase 0: 環境構築
+各フェーズには gate (前段の完了条件) があり、gate を満たさない場合は次フェーズに進まない方針とする。
+
+```text
+Phase 0 (環境 + アーキテクチャ調査 + 評価器 spot check)
+  ↓ gate: hook 候補 layer 特定済み + 評価器信頼性レンジ把握済み
+Phase 1 (prompt-only) ← MVP の最小到達点
+  ↓ gate: prompt-only の天井観測 + 不足要素の言語化
+Phase 2 (候補評価)
+  ↓ gate: 自動スコアと主観の相関確認 + 閾値補正完了
+  ↓ ここで要件達成なら Phase 3 以降は不要
+Phase 3 (Activation Steering)
+  ↓ gate: alpha=0 で通常生成と一致 + alpha 増加で感情スコアが変化
+Phase 4 (Projection Removal)
+  ├─ 4a: Geometric Validation Spike (線形分離可能性検証)
+  │   ↓ gate: 線形分離が機能する見通し
+  └─ 4b: 本実装
+  ↓ gate: speaker similarity の低下が抑制される
+Phase 5 (Black-box Optimization)
+  ↓ gate: 評価器が validated で artifact 最適化のリスクが低い
+Phase 6 (Optional VC / Teacher 比較) -- オプション
+```
+
+
+## Phase 0: 環境構築・前提検証
 
 - [ ] OmniVoice をローカルで通常実行できるようにする
 - [ ] target speaker prompt で通常TTS生成できることを確認
@@ -766,12 +803,28 @@ class Thresholds:
 - [ ] speaker encoder を導入する
 - [ ] pyworld / librosa / VAD を導入する
 - [ ] 出力wavの保存・再生確認を行う
+- [ ] **OmniVoice アーキテクチャ調査**
+  - LLM 部 / audio decoder 部の境界を特定する
+  - instruction tokens / acoustic prompt tokens の入り口と流れを把握する
+  - hidden state を取得・上書き可能な layer 候補を列挙する (Phase 3 の hook 設計に直結)
+- [ ] **評価器の日本語信頼性 spot check (10〜20 サンプル)**
+  - SER モデル (emotion2vec 等) のラベル/embedding と人手評価の相関を確認
+  - speaker encoder が同一話者の感情変化に対してどれだけ embedding が動くかを測る
+  - Whisper の CER が感情強度でどれだけ悪化するかを把握
+  - 結果に応じて Phase 2 の閾値・重みの初期値を決める
+
+完了条件：
+
+- 通常 TTS 生成が再現可能
+- hook 可能な layer 候補が文書化されている
+- 評価器ごとの信頼性レンジが把握されており、後続の閾値設計の根拠になっている
 
 ---
 
-## Phase 1: Prompt制御のみ
+## Phase 1: Prompt制御のみ (Phase 3-4 必要性の判定 gate)
 
 目的：OmniVoice本体を改造せず、感情参照音声からinstructionを生成して感情制御を試す。
+本フェーズは同時に **prompt-only でどこまで感情転写できるかの天井を観測し、Phase 3-4 (steering) に進む必要があるかを判定する gate** として位置付ける。
 
 - [ ] EmotionAnalyzer を実装
 - [ ] ProsodyAnalyzer を実装
@@ -780,11 +833,14 @@ class Thresholds:
 - [ ] prompt-only 生成スクリプトを実装
 - [ ] 出力音声を主観評価
 - [ ] emotion2vecで出力感情を自動評価
+- [ ] **天井観測**: 感情強度・prosody 反映度・話者性保持の 3軸で prompt-only の到達点を定量化
+- [ ] **不足要素の特定**: 何が足りないか (感情強度? 抑揚? 息遣い?) を言語化し、Phase 3-4 で何を補うべきかを明文化
 
 完了条件：
 
 - target speaker prompt の声質を大きく崩さず、感情ラベルに沿った出力が得られる
 - prompt.txt と result.json が保存される
+- prompt-only の限界点と、Phase 3-4 着手の要否判断が文書化されている
 
 ---
 
@@ -810,9 +866,14 @@ class Thresholds:
 
 目的：OmniVoice内部hiddenに感情方向を足して、感情の出方を強める。
 
+**前提**: Phase 0 のアーキテクチャ調査で hook 可能な layer 候補が特定されていること。Phase 1 の天井観測で「prompt-only では届かない不足要素」が言語化されていること。これらが揃わないうちは本フェーズに着手しない。
+
 - [ ] OmniVoice の Transformer block に hook を入れる
 - [ ] 指定 layer の hidden state を取得する
 - [ ] emotional / neutral の hidden 差分を計算する
+  - **時間平均は whole-utterance 単純平均を避け、有声フレーム限定平均を採用する**
+  - 可能なら同一テキスト読み上げ対 (neutral_ref と emotional_ref を同一テキスト) で差分を取る
+  - 単純平均しか取れない場合でも、layer ごとに L2 / RMS normalize する
 - [ ] steering vector を保存・読み込みできるようにする
 - [ ] 推論時に hidden state へ alpha * vector を加算する
 - [ ] alpha_grid による候補生成を実装する
@@ -828,7 +889,19 @@ class Thresholds:
 
 目的：感情方向ベクトルから話者方向成分を除去し、話者性崩壊を抑える。
 
-- [ ] speaker direction vector を定義する
+### Phase 4a: Geometric Validation Spike (本実装の前)
+
+`v_emo - proj(v_emo, v_spk)` は「感情と話者性が hidden 空間で線形に分離可能」という強い仮定の上に乗っている。本実装に進む前に、この仮定を最低限のコストで検証する。
+
+- [ ] 多話者 × 多感情 (最低 3話者 × 3感情) で hidden を抽出する
+- [ ] PCA / linear probe で「話者軸」と「感情軸」の直交性を見る
+- [ ] [:404-421](#) の speaker direction 3候補のうちどれが最も話者情報を捕捉するかを linear probe で比較し、採用候補を1つに絞る
+- [ ] projection removal 適用前後の hidden を speaker classifier に通し、話者情報が落ちることを確認する
+- [ ] 結果が芳しくない場合は Phase 4 本実装を見送り、Phase 1-3 で着地させる判断材料とする
+
+### Phase 4b: 本実装
+
+- [ ] speaker direction vector を Phase 4a で選定した定義で実装する
 - [ ] remove_projection を実装する
 - [ ] layerごとに projection removal を適用する
 - [ ] projection removal on/off の比較評価を行う
@@ -836,6 +909,7 @@ class Thresholds:
 
 完了条件：
 
+- Phase 4a の geometric validation で線形分離の有効性が確認されている
 - projection removal により target speaker similarity の低下が抑えられる
 - emotion similarity が極端に低下しない
 
@@ -910,13 +984,13 @@ class Thresholds:
 # configs/default.yaml
 
 generation:
-  num_candidates: 20
-  alpha_grid: [0.0, 0.15, 0.3, 0.45, 0.6, 0.8]
+  # MVP では反復速度を確保するため候補数を絞る
+  # Phase 5 (black-box optimization) で広げる
+  num_candidates: 8
+  alpha_grid: [0.0, 0.4, 0.8]
   layer_sets:
     - []
-    - [8]
     - [12]
-    - [16]
     - [8, 12, 16]
   projection_removal: true
 
@@ -1045,12 +1119,18 @@ def compute_total_score(scores, weights):
 | 日本語感情表現の弱さ | SERモデルが英語寄り | 日本語音声で主観評価を重視 |
 | 内容崩壊 | 感情を強めると発音が崩れる | ASR/CER制約 |
 | 生成時間増大 | 候補生成数が多い | alpha/layer探索を段階化 |
+| 評価器の日本語信頼性不足 | 自動スコアが主観と乖離し探索が artifact を最適化する | Phase 0 で spot check を実施し閾値・重みを補正 |
+| hidden 抽出の粒度不足 | whole-utterance 単純平均で content/prosody/speaker が混入 | 同一テキスト対差分・有声フレーム平均を優先 |
+| 線形分離仮定の破綻 | 感情と話者性が hidden 上で線形に分離できない | Phase 4a の geometric validation で事前検証、不可なら Phase 4 を見送る |
+| speaker direction 定義の不確定性 | 3 候補で結果が大きく変わる | Phase 4a で linear probe による比較・選定 |
+| hook 可能性の不明 | OmniVoice の特定 layer が hook できない | Phase 0 のアーキテクチャ調査で事前確認、不可なら Phase 3 を見送る |
+| Phase 1 で十分なケースの見落とし | prompt-only で要件達成しているのに steering を実装してしまう | Phase 1 の天井観測を gate として明示 |
 
 ---
 
 ## 17. 推奨初期MVP
 
-最初に作るべき最小構成は以下。
+最初に作るべき最小構成は以下 (Phase 0 + Phase 1 + Phase 2 のスコープ)。
 
 ```text
 EmotionAnalyzer
@@ -1062,25 +1142,35 @@ CandidateEvaluator
 BestCandidateSelector
 ```
 
-MVPでは activation steering は入れない。
+MVPでは activation steering は入れない。Phase 0 のアーキテクチャ調査と評価器 spot check を実施した上で、Phase 1 の天井観測まで到達することを MVP の完了条件とする。
 
 ### MVPの流れ
 
 ```text
-emotion reference audio
-  ↓
-emotion/prosody抽出
-  ↓
-instruction生成
-  ↓
-OmniVoiceで候補生成
-  ↓
-speaker/emotion評価
-  ↓
-best candidate選択
+[Phase 0]
+  OmniVoice アーキテクチャ調査 (hook 候補 layer 列挙)
+  評価器 spot check (10〜20 サンプル、主観相関確認)
+       ↓
+[Phase 1]
+  emotion reference audio
+       ↓
+  emotion/prosody 抽出
+       ↓
+  instruction 生成
+       ↓
+  OmniVoice で生成 (steering なし)
+       ↓
+[Phase 2]
+  speaker/emotion 評価 (信頼性補正済み閾値)
+       ↓
+  best candidate 選択
+       ↓
+  prompt-only の天井観測と Phase 3-4 着手要否の判断
 ```
 
-MVP完了後に hidden steering を追加する。
+MVP の出力としては final.wav に加え、**「Phase 3-4 が必要か」の判定文書**を残すことを必須とする。これによって不要な steering 実装を回避できる。
+
+MVP 完了後、必要と判断された場合に hidden steering / projection removal を Phase 3-4 として段階的に追加する。
 
 ---
 
@@ -1265,19 +1355,31 @@ python scripts/run_emotion_transfer.py \
 本設計の中核は以下である。
 
 ```text
-感情参照音声から emotion/prosody を抽出する
-  ↓
-OmniVoice instruction に変換する
-  ↓
-必要に応じて hidden activation steering で感情を強める
-  ↓
-感情方向から話者方向成分を射影除去する
-  ↓
-複数候補を生成する
-  ↓
-emotion similarity と speaker similarity で選別する
+[Phase 0]   アーキテクチャ調査 + 評価器 spot check
+              ↓ gate
+[Phase 1]   感情参照音声から emotion/prosody を抽出
+              ↓
+            OmniVoice instruction に変換 (prompt-only)
+              ↓ gate: 天井観測 + 不足要素の言語化
+[Phase 2]   複数候補を生成し、信頼性検証済みの評価器で選別
+              ↓ gate: ここで要件達成なら Phase 3 以降は不要
+[Phase 3]   必要に応じて hidden activation steering で感情を強める
+              ↓
+[Phase 4a]  Geometric Validation Spike (線形分離可能性検証)
+              ↓ gate
+[Phase 4b]  感情方向から話者方向成分を射影除去
+              ↓
+[Phase 5]   black-box optimization で Pareto 最適候補を探索
+              ↓
+[Phase 6]   (オプション) VC / Teacher 比較
 ```
 
 この方式は厳密な学習済み disentanglement ではないが、追加学習データなしで実装可能な範囲では、話者性崩壊を抑えつつ感情転写を強める現実的なアプローチである。
 
-最初は prompt-only MVP から開始し、その後 activation steering と projection removal を段階的に導入することを推奨する。
+実装方針の要点は以下:
+
+- **gate 駆動**: 各フェーズには明示的な前提条件を置き、満たさない限り次に進まない。これにより「効かない実装」を抱え込むリスクを抑える
+- **Phase 1 は天井観測の場**: prompt-only で要件が達成できれば Phase 3-4 は不要。実装コストを節約する判断材料を必ず残す
+- **評価器の事前検証**: 自動スコアと主観評価の相関を Phase 0 で確認しなければ、Phase 5 の最適化は artifact を最適化するだけになる
+- **線形分離仮定の事前検証**: Phase 4 は本実装の前に Geometric Validation Spike を必ず通す
+- **Hidden 抽出の精緻化**: whole-utterance 単純平均は最後の手段とし、同一テキスト対差分・有声フレーム平均を優先する
