@@ -1,0 +1,67 @@
+# Default configuration for ovet Phase 2 runs.
+
+generation:
+  # How many times to repeat each (instruct) candidate spec.
+  # Used by Phase 2 stability checks.
+  reps_per_spec: 1
+
+  # Phase 3+ controls (unused in Phase 2)
+  alpha_grid:        [0.0]
+  layer_sets:        [[]]
+  projection_removal_language: false
+
+# Hard constraints applied at candidate selection time.
+# Tuned from Phase 1 batch observations: cross-lingual cloning produces
+# speaker_sim in 0.4-0.7 range, so 0.85 is too strict for our use case.
+thresholds:
+  content_error: 0.30
+  quality:       0.50
+  speaker:       0.40
+
+# Score weights (per design §15.3). Distance terms enter negatively.
+scoring:
+  vad:        1.0
+  valence:    0.8
+  arousal:    0.4
+  f0_dev:     0.3
+  energy_dev: 0.5
+  e2v_cos:    0.3
+  content:    0.8
+  quality:    0.5
+
+# Proxy grid: one or more instruct strings to try per emotion.
+# `null` means "no instruct" (pure baseline cloning).
+proxy_grid:
+  anger:
+    - null
+    - "high pitch"
+    - "low pitch"
+  sad:
+    - null
+    - "low pitch"
+    - "very low pitch"
+  fear:
+    - null
+    - "high pitch"
+    - "whisper"
+  happy:
+    - null
+    - "high pitch"
+    - "moderate pitch"
+  surprise:
+    - null
+    - "high pitch"
+    - "very high pitch"
+  disgust:
+    - null
+    - "low pitch"
+    - "moderate pitch"
+  neutral:
+    - null
+    - "moderate pitch"
+
+stability:
+  # If enabled, every spec is generated this many times and per-metric
+  # std is computed. Used to validate Phase 5 grid-search reliability.
+  enabled: false
+  reps: 3

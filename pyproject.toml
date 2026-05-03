@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ovet"
+version = "0.1.0"
+description = "OmniVoice cross-lingual emotion preservation pipeline (training-free)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "soundfile",
+    "librosa",
+    "pyworld",
+    "pydantic",
+    "pyyaml",
+]
+
+[project.scripts]
+ovet-clone = "ovet.cli.run_emotion_clone:main"
+ovet-evaluate = "ovet.cli.evaluate_candidates:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ovet"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

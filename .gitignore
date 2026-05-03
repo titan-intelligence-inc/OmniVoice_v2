@@ -1,0 +1,66 @@
+# --------------------------------------------------------------
+# Python
+# --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# --------------------------------------------------------------
+# Virtual environments
+# (re-create with: python3.11 -m venv venv && pip install -e .)
+# --------------------------------------------------------------
+venv/
+.venv/
+env/
+.env/
+
+# --------------------------------------------------------------
+# Upstream OmniVoice — clone separately per README
+#   git clone --depth 1 https://github.com/k2-fsa/OmniVoice.git upstream/OmniVoice
+# --------------------------------------------------------------
+upstream/
+
+# --------------------------------------------------------------
+# Generated outputs and downloaded data (regeneratable)
+#   - outputs/ : per-phase experiment artefacts (wav, npz, json, md)
+#   - baseline/: JVNV-extracted refs + baseline experimental output
+#   - audio_out/ : OmniVoice smoke-test audios
+# --------------------------------------------------------------
+outputs/
+audio_out/
+baseline/
+
+# --------------------------------------------------------------
+# Hugging Face / model caches
+# --------------------------------------------------------------
+hf_cache/
+.cache/
+*.npz
+*.safetensors
+
+# --------------------------------------------------------------
+# Editor / OS
+# --------------------------------------------------------------
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --------------------------------------------------------------
+# Local environment overrides — never commit secrets
+# --------------------------------------------------------------
+.env
+.envrc
+*.pem
+*.key
+credentials.json
