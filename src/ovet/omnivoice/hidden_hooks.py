@@ -109,9 +109,19 @@ class HiddenSteerer:
     The hook adds ``alpha * vectors[i]`` to the layer-i hidden state on
     every forward call.
 
+    Optional refinements
+    --------------------
+    * ``step_window=(start, end)`` — only apply steering when the diffusion
+      step (counted internally by counting forward calls of the smallest-id
+      hooked layer) is in ``[start, end)``. ``end=None`` means "open".
+    * ``norm_clip_factor=β`` — cap the per-layer ``alpha * v`` magnitude at
+      ``β * mean(|h_t|)`` per call. Prevents distribution-shift artefacts at
+      high alpha while keeping the same direction.
+
     Usage::
 
-        with HiddenSteerer(model, alpha=0.4, vectors={8: v8, 12: v12}):
+        with HiddenSteerer(model, alpha=0.4, vectors={8: v8, 12: v12},
+                           step_window=(0, 8), norm_clip_factor=0.3):
             audio = wrapper.generate(...)
     """
 
@@ -120,12 +130,28 @@ class HiddenSteerer:
         model,
         alpha: float,
         vectors: dict[int, np.ndarray],
+        *,
+        step_window: tuple[int, int | None] | None = None,
+        norm_clip_factor: float | None = None,
+        position_mask: bool = False,
     ):
         self.model   = model
         self.alpha   = float(alpha)
         self.vectors = vectors
+        self.step_window      = step_window
+        self.norm_clip_factor = norm_clip_factor
+        self.position_mask    = bool(position_mask)
+
         self._handles = []
         self._tensors: dict[int, torch.Tensor] = {}
+        self._original_forward = None      # for monkey-patching when position_mask=True
+
+        sorted_ids = sorted(self.vectors.keys()) if self.vectors else []
+        # We tick the step counter once per LLM forward — increment after the
+        # *last* hooked layer fires so all hooks within a step see the same value.
+        self._first_layer_id = sorted_ids[0] if sorted_ids else None
+        self._last_layer_id  = sorted_ids[-1] if sorted_ids else None
+        self._step_counter   = 0
 
     # ------------------------------------------------------------------
     def __enter__(self):
@@ -145,6 +171,24 @@ class HiddenSteerer:
             self._handles.append(
                 layer.register_forward_hook(self._make_hook(layer_id))
             )
+        self._step_counter = 0
+
+        if self.position_mask:
+            # Capture audio_mask via a wrapped forward — hooks read it from
+            # ``model._ovet_audio_mask``.
+            self._original_forward = self.model.forward
+            steerer = self
+            orig = self._original_forward
+
+            def _wrapped(*args, **kwargs):
+                am = kwargs.get("audio_mask")
+                if am is None and len(args) > 1:
+                    am = args[1]
+                steerer.model._ovet_audio_mask = am
+                return orig(*args, **kwargs)
+
+            self.model.forward = _wrapped
+
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -152,14 +196,64 @@ class HiddenSteerer:
             h.remove()
         self._handles.clear()
         self._tensors.clear()
+        if self._original_forward is not None:
+            self.model.forward = self._original_forward
+            self._original_forward = None
+        if hasattr(self.model, "_ovet_audio_mask"):
+            del self.model._ovet_audio_mask
 
     # ------------------------------------------------------------------
+    def _step_in_window(self) -> bool:
+        if self.step_window is None:
+            return True
+        start, end = self.step_window
+        s = self._step_counter
+        if s < start:
+            return False
+        if end is not None and s >= end:
+            return False
+        return True
+
+    def _maybe_clip_delta(self, delta: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+        """Cap ``|delta| <= norm_clip_factor * mean(|h_t|)`` if requested."""
+        if self.norm_clip_factor is None:
+            return delta
+        # h shape [batch, seq, hidden]; per-position L2 then mean
+        h_norm = h.detach().to(torch.float32).norm(dim=-1).mean().item()
+        cap    = float(self.norm_clip_factor) * h_norm
+        d_norm = float(torch.norm(delta).item())
+        if d_norm <= 1e-12 or d_norm <= cap:
+            return delta
+        return delta * (cap / d_norm)
+
     def _make_hook(self, layer_id: int):
         v = self._tensors[layer_id]
         a = self.alpha
 
         def hook(_module, _inputs, outputs):
+            apply = self._step_in_window()
+
+            if not apply:
+                if layer_id == self._last_layer_id:
+                    self._step_counter += 1
+                return outputs
+
             h, rest = _split_output(outputs)
-            # h: [batch, seq, hidden]; v: [hidden] broadcasts over (batch, seq)
-            return _rebuild_output(h + a * v, rest)
+            delta = a * v
+            delta = self._maybe_clip_delta(delta, h)
+
+            if self.position_mask:
+                am = getattr(self.model, "_ovet_audio_mask", None)
+                if am is not None:
+                    # am: [batch, seq] bool/int → match h's batch+seq shape
+                    mask = am.to(device=h.device, dtype=h.dtype).unsqueeze(-1)
+                    new_h = h + delta.view(1, 1, -1) * mask
+                else:
+                    new_h = h + delta
+            else:
+                new_h = h + delta
+
+            if layer_id == self._last_layer_id:
+                self._step_counter += 1
+            return _rebuild_output(new_h, rest)
         return hook

@@ -22,12 +22,47 @@ def _normalize_text(s: str) -> str:
     return s.strip()
 
 
-def _cer(ref: str, hyp: str) -> float:
-    """Character error rate (Levenshtein / len(ref)). 0.0..>1.0."""
+def _detect_hallucination(s: str, *, max_cycle: int = 4, min_repeats: int = 5) -> bool:
+    """True if ``s`` contains a Whisper-style repetition loop.
+
+    Catches both single-char runs (``"娃娃娃娃娃..."``) and short-cycle
+    repetitions (``"abcabcabc..."``). Run-length cutoff is
+    ``cycle_len * min_repeats`` characters.
+    """
+    if not s:
+        return False
+    n = len(s)
+    for cycle_len in range(1, max_cycle + 1):
+        if n < cycle_len * min_repeats:
+            continue
+        # Slide; only need to check positions that allow min_repeats fits
+        for start in range(n - cycle_len * min_repeats + 1):
+            chunk = s[start:start + cycle_len]
+            ok = True
+            for k in range(1, min_repeats):
+                if s[start + k * cycle_len : start + (k + 1) * cycle_len] != chunk:
+                    ok = False
+                    break
+            if ok:
+                return True
+    return False
+
+
+def _cer(ref: str, hyp: str, *, cap: float | None = 2.0) -> float:
+    """Character error rate (Levenshtein / len(ref)).
+
+    If ``hyp`` contains a Whisper repetition loop or CER would exceed
+    ``cap``, the returned value is clipped at ``cap``. This prevents a
+    single hallucinated rep from dominating downstream means.
+
+    Set ``cap=None`` to disable capping (returns raw CER).
+    """
     ref_n = _normalize_text(ref)
     hyp_n = _normalize_text(hyp)
     if not ref_n:
         return 0.0 if not hyp_n else 1.0
+    if _detect_hallucination(hyp_n) and cap is not None:
+        return cap
     # Levenshtein distance
     m, n = len(ref_n), len(hyp_n)
     dp = list(range(n + 1))
@@ -39,7 +74,10 @@ def _cer(ref: str, hyp: str) -> float:
             cost = 0 if ref_n[i - 1] == hyp_n[j - 1] else 1
             dp[j] = min(dp[j] + 1, dp[j - 1] + 1, prev + cost)
             prev = cur
-    return dp[n] / m
+    raw = dp[n] / m
+    if cap is not None and raw > cap:
+        return cap
+    return raw
 
 
 class ASRAnalyzer:

@@ -30,6 +30,7 @@ class MetricStats:
     minv: float
     maxv: float
     n: int
+    median: float = 0.0
 
 
 @dataclass
@@ -52,13 +53,14 @@ class StabilityReport:
 
 def _stats(values: list[float]) -> MetricStats:
     if not values:
-        return MetricStats(0.0, 0.0, 0.0, 0.0, 0)
+        return MetricStats(0.0, 0.0, 0.0, 0.0, 0, 0.0)
     return MetricStats(
         mean=float(statistics.fmean(values)),
         std=float(statistics.pstdev(values)) if len(values) > 1 else 0.0,
         minv=float(min(values)),
         maxv=float(max(values)),
         n=len(values),
+        median=float(statistics.median(values)),
     )
 
 
