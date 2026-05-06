@@ -172,6 +172,65 @@ def _build_per_language_v_lang(
     return v_lang, target_paths
 
 
+def _build_multispeaker_v_lang(
+    wrapper: OmniVoiceWrapper,
+    cloning_refs: list[tuple[str, Path, str]],   # [(speaker_tag, audio, ref_text)]
+    base_lang_code: str,
+    base_lang_full: str,
+    base_lang_text: str,
+    targets: list[tuple[str, str, str]],
+    layers: list[int],
+    seed: int,
+    num_step: int,
+    out_dir: Path,
+) -> tuple[
+    dict[str, dict[int, np.ndarray]],                       # averaged v_lang[code][L]
+    dict[str, dict[str, dict[int, np.ndarray]]],            # per_speaker[spk][code][L]
+]:
+    """Build per-language v_lang averaged across multiple speaker refs.
+
+    Each speaker's clone pair is generated independently (under
+    ``out_dir/<speaker_tag>/``). Per-layer per-language averaging happens
+    after all speakers are processed. The averaged dict has the same
+    shape as ``_build_per_language_v_lang`` so it's a drop-in
+    replacement at the call site.
+
+    Rationale: with a single ref speaker (e.g. JVNV F1), v_lang carries
+    that speaker's idiosyncratic JP coloring. Averaging across multiple
+    JP speakers cancels per-speaker noise while leaving the shared
+    language-axis signal intact, yielding a less F1-flavoured accent
+    direction.
+    """
+    per_speaker: dict[str, dict[str, dict[int, np.ndarray]]] = {}
+    for spk_tag, ref_audio, ref_text in cloning_refs:
+        print(f"[ovet] v_lang for speaker={spk_tag} ({ref_audio.name})", flush=True)
+        v_lang_spk, _ = _build_per_language_v_lang(
+            wrapper,
+            cloning_ref_audio=ref_audio,
+            cloning_ref_text=ref_text,
+            base_lang_code=base_lang_code,
+            base_lang_full=base_lang_full,
+            base_lang_text=base_lang_text,
+            targets=targets,
+            layers=layers,
+            seed=seed,
+            num_step=num_step,
+            out_dir=out_dir / spk_tag,
+        )
+        per_speaker[spk_tag] = v_lang_spk
+
+    averaged: dict[str, dict[int, np.ndarray]] = {}
+    for code, _, _ in targets:
+        averaged[code] = {}
+        for L in layers:
+            stacked = np.stack(
+                [per_speaker[spk][code][L] for spk in per_speaker]
+            )
+            averaged[code][L] = stacked.mean(axis=0).astype(np.float32)
+
+    return averaged, per_speaker
+
+
 # ------------------------------------------------------------------
 # HTML & Markdown report generators
 # ------------------------------------------------------------------
@@ -387,26 +446,79 @@ def main():
     # ------------------------------------------------------------------
     # Build per-language v_lang via OmniVoice self-generation
     # ------------------------------------------------------------------
-    print(f"[ovet] Building per-language v_lang (base={base_lang_code}) ...", flush=True)
-    # Use anger ref as the cloning speaker for self-gen (any emotion works,
-    # just needs the same speaker — we pick anger for consistency w/ Phase 3-5).
-    cloning_ref_audio, cloning_ref_text = emo_refs.get("anger") or next(iter(emo_refs.values()))
-    v_lang_per_lang, lang_pair_paths = _build_per_language_v_lang(
-        w,
-        cloning_ref_audio=cloning_ref_audio,
-        cloning_ref_text=cloning_ref_text,
-        base_lang_code=base_lang_code,
-        base_lang_full=base_lang_full,
-        base_lang_text=base_lang_text,
-        targets=languages,
-        layers=layers,
-        seed=args.seed,
-        num_step=probe_steps,
-        out_dir=args.output_dir / "lang_pair_clones",
-    )
+    # Optional multi-speaker averaging: if v_lang_speakers lists 2+ JVNV
+    # speakers, build per-speaker v_lang then average. This dilutes the
+    # ref speaker's idiosyncratic JP coloring while preserving the
+    # shared language-axis signal.
+    v_lang_speaker_codes: list[str] = mlc.get("v_lang_speakers") or [ref_speaker]
+    v_lang_clone_emo: str = mlc.get("v_lang_clone_emotion", "anger")
+
+    cloning_refs: list[tuple[str, Path, str]] = []
+    for spk in v_lang_speaker_codes:
+        spk_ref_path = ref_audio_dir / f"jvnv_{spk}_{v_lang_clone_emo}.wav"
+        if not spk_ref_path.exists():
+            # Fall back to multi-speaker JVNV dir if main dir doesn't have this speaker
+            alt = Path("baseline/jvnv_samples_multi") / f"jvnv_{spk}_{v_lang_clone_emo}.wav"
+            if alt.exists():
+                spk_ref_path = alt
+            else:
+                raise FileNotFoundError(
+                    f"missing JVNV ref for v_lang speaker={spk} emo={v_lang_clone_emo}: "
+                    f"tried {spk_ref_path} and {alt}"
+                )
+        spk_ref_text = w.transcribe(spk_ref_path, language=None)
+        cloning_refs.append((spk, spk_ref_path, spk_ref_text))
+
+    if len(cloning_refs) == 1:
+        # Single-speaker (legacy) path — keep on-disk layout identical.
+        spk_tag, cloning_ref_audio, cloning_ref_text = cloning_refs[0]
+        print(f"[ovet] Building v_lang single-speaker={spk_tag} (base={base_lang_code}) ...", flush=True)
+        v_lang_per_lang, lang_pair_paths = _build_per_language_v_lang(
+            w,
+            cloning_ref_audio=cloning_ref_audio,
+            cloning_ref_text=cloning_ref_text,
+            base_lang_code=base_lang_code,
+            base_lang_full=base_lang_full,
+            base_lang_text=base_lang_text,
+            targets=languages,
+            layers=layers,
+            seed=args.seed,
+            num_step=probe_steps,
+            out_dir=args.output_dir / "lang_pair_clones",
+        )
+        v_lang_per_speaker = None
+    else:
+        print(
+            f"[ovet] Building v_lang multi-speaker={v_lang_speaker_codes} "
+            f"(base={base_lang_code}) ...", flush=True,
+        )
+        v_lang_per_lang, v_lang_per_speaker = _build_multispeaker_v_lang(
+            w,
+            cloning_refs=cloning_refs,
+            base_lang_code=base_lang_code,
+            base_lang_full=base_lang_full,
+            base_lang_text=base_lang_text,
+            targets=languages,
+            layers=layers,
+            seed=args.seed,
+            num_step=probe_steps,
+            out_dir=args.output_dir / "lang_pair_clones",
+        )
+        # Save per-speaker artifacts for inspection
+        for spk_tag, vl_dict in v_lang_per_speaker.items():
+            for code, vl in vl_dict.items():
+                save_vectors(
+                    args.output_dir / f"v_lang_{code}_{spk_tag}.npz", vl,
+                    meta={"target": code, "base": base_lang_code,
+                          "speaker": spk_tag, "layers": layers},
+                )
+
     for code, vl in v_lang_per_lang.items():
         save_vectors(args.output_dir / f"v_lang_{code}.npz", vl,
-                     meta={"target": code, "base": base_lang_code, "layers": layers})
+                     meta={"target": code, "base": base_lang_code,
+                           "speakers": v_lang_speaker_codes,
+                           "clone_emotion": v_lang_clone_emo,
+                           "layers": layers})
 
     # ------------------------------------------------------------------
     # Sweep

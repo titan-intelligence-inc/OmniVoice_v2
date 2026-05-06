@@ -42,6 +42,15 @@ target_text:
 ref_audio_dir: "baseline/jvnv_samples"
 ref_speaker: F1
 
+# v_lang construction speakers. With a single entry, builds v_lang from
+# that speaker's JP→target self-clones (legacy behaviour). With 2+
+# entries, builds per-speaker v_lang and averages — dilutes ref
+# speaker's idiosyncratic JP coloring, leaves shared language-axis
+# signal intact. Falls back to baseline/jvnv_samples_multi/ if a
+# speaker isn't present in ref_audio_dir.
+v_lang_speakers: [F1, F2, M1, M2]
+v_lang_clone_emotion: anger
+
 # Steering hyperparameters (shared defaults).
 steering:
   layers: [8, 12, 16]
