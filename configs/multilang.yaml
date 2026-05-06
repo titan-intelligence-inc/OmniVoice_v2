@@ -1,0 +1,86 @@
+# Multi-language production sweep configuration.
+#
+# Used by: src/ovet/cli/run_multilang.py
+#
+# Texts are intentionally emotionally neutral ("partly cloudy weather forecast")
+# so the listener can attribute any emotional colouring to ref-audio steering
+# rather than to lexical content.
+
+emotions: [anger, sad, fear, happy, surprise, disgust]
+
+# OmniVoice's `language` argument expects the full English name.
+language_full_name:
+  en: English
+  ja: Japanese
+  zh: Chinese
+  ko: Korean
+  es: Spanish
+  fr: French
+  de: German
+  pt: Portuguese
+  ru: Russian
+  vi: Vietnamese
+
+# Display order for index pages — also defines the sweep order.
+language_order: [en, ja, zh, ko, es, fr, de, pt, ru, vi]
+
+# Emotionally-neutral target text per language.
+target_text:
+  en: "The weather forecast for tomorrow is partly cloudy."
+  ja: "明日の天気予報は曇り時々晴れです。"
+  zh: "明天的天气预报是多云转晴。"
+  ko: "내일 일기 예보는 가끔 구름이 끼겠습니다."
+  es: "El pronóstico del tiempo para mañana es parcialmente nublado."
+  fr: "Les prévisions météo pour demain annoncent un temps partiellement nuageux."
+  de: "Die Wettervorhersage für morgen ist teilweise bewölkt."
+  pt: "A previsão do tempo para amanhã é parcialmente nublado."
+  ru: "Прогноз погоды на завтра — переменная облачность."
+  vi: "Dự báo thời tiết ngày mai là có mây rải rác."
+
+# JVNV references — single speaker (F1), one sample per emotion.
+# The cloning ref is the emotion-bearing recording itself.
+ref_audio_dir: "baseline/jvnv_samples"
+ref_speaker: F1
+
+# Steering hyperparameters (shared defaults).
+steering:
+  layers: [8, 12, 16]
+  num_step_probe: 4            # diffusion steps when capturing hiddens
+
+# One sweep cell per (lang × emo × strategy × rep). Each strategy fixes
+# the steering knobs (emotion alpha, accent alpha, projection on/off).
+# Add or remove strategies freely — the CLI iterates whatever is here.
+strategies:
+  - name: baseline                # OmniVoice native, no steering
+    alpha: 0.0
+    accent_alpha: 0.0
+    projection_removal: false
+  - name: phase4                  # alpha=1.0 + v_emo cleaned via v_lang projection
+    alpha: 1.0
+    accent_alpha: 0.0
+    projection_removal: true
+  - name: phase4_accent_strong    # uniform: accent=1.0, all 32 diffusion steps
+    alpha: 1.0
+    accent_alpha: 1.0
+    projection_removal: true
+  - name: phase4_accent_v2        # PRODUCTION — localized overdrive
+    alpha: 1.0                    # emotion steering normal
+    accent_alpha: 2.0             # accent overdriven
+    projection_removal: true
+    step_window: [0, 4]           # only first 4 of 32 diffusion steps
+    # Rationale: confined 4-step overdrive locks in target-language acoustics
+    # while the remaining 28 steps refine prosody freely → clean intonation
+    # + retained accent-removal vs anchor's "rough but accent-right" tradeoff.
+
+# v_lang base language: hidden(L1) − hidden(target). L1 here is the
+# reference speaker's native language (Japanese), since v_emo is built
+# from JVNV (JP). For monolingual cells (target=ja) v_lang ≈ 0.
+v_lang_base_language: ja
+
+# How many times to repeat each (lang × emotion × cell) combination.
+# Stats are computed across reps; the listening file is "best-of-reps".
+reps: 3
+
+# Best-of-reps selection metric (lower is better for vad_dist).
+best_metric: vad_dist
+best_direction: min
