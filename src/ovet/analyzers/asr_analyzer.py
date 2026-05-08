@@ -14,11 +14,24 @@ from ..utils.io import load_wav
 _DEFAULT_MODEL = "openai/whisper-large-v3-turbo"
 
 
-def _normalize_text(s: str) -> str:
-    """Cheap normalization for CER: lowercase, strip ws/punct."""
+def _normalize_text(s: str, *, zh: bool = False) -> str:
+    """Cheap normalization for CER: lowercase, strip ws/punct.
+
+    When ``zh=True``, also fold Traditional Chinese to Simplified via
+    ``zhconv``. Use this for Mandarin evaluation: Whisper sometimes
+    emits Traditional characters even when the audio is Mandarin /
+    written reference is Simplified, inflating CER spuriously
+    (e.g. 东 vs 東 or 岛 vs 島).
+    """
     import re
     s = s.lower()
-    s = re.sub(r"[\s\.,!?。、！？・…]+", "", s)
+    s = re.sub(r"[\s\.,!?。、！？・…“”‘’\"'(){}\[\]\(\)（）「」『』]+", "", s)
+    if zh:
+        try:
+            import zhconv
+            s = zhconv.convert(s, "zh-cn")
+        except Exception:
+            pass
     return s.strip()
 
 
@@ -48,17 +61,21 @@ def _detect_hallucination(s: str, *, max_cycle: int = 4, min_repeats: int = 5) -
     return False
 
 
-def _cer(ref: str, hyp: str, *, cap: float | None = 2.0) -> float:
+def _cer(ref: str, hyp: str, *, cap: float | None = 2.0,
+         zh: bool = False) -> float:
     """Character error rate (Levenshtein / len(ref)).
 
     If ``hyp`` contains a Whisper repetition loop or CER would exceed
     ``cap``, the returned value is clipped at ``cap``. This prevents a
     single hallucinated rep from dominating downstream means.
 
+    When ``zh=True``, both ref and hyp are Simplified-folded before
+    comparison (use this for Mandarin to avoid Trad/Simp inflation).
+
     Set ``cap=None`` to disable capping (returns raw CER).
     """
-    ref_n = _normalize_text(ref)
-    hyp_n = _normalize_text(hyp)
+    ref_n = _normalize_text(ref, zh=zh)
+    hyp_n = _normalize_text(hyp, zh=zh)
     if not ref_n:
         return 0.0 if not hyp_n else 1.0
     if _detect_hallucination(hyp_n) and cap is not None:
@@ -124,7 +141,19 @@ class ASRAnalyzer:
         wav_path: str | Path,
         reference_text: str,
         language: str | None = None,
+        *,
+        zh_normalize: bool | None = None,
     ) -> float:
-        """CER between hypothesis and reference. Returns float in [0, ~1+]."""
+        """CER between hypothesis and reference. Returns float in [0, ~1+].
+
+        For Mandarin (``language`` resolves to ``"chinese"``),
+        ``zh_normalize`` defaults to True — fold Trad/Simp before
+        comparison, since Whisper-large-v3-turbo often emits Traditional
+        characters even when the reference text is Simplified, which
+        otherwise inflates CER spuriously.
+        """
         hyp = self.transcribe(wav_path, language=language)
-        return _cer(reference_text, hyp)
+        is_zh = self._LANG_HINT.get(language) == "chinese"
+        if zh_normalize is None:
+            zh_normalize = is_zh
+        return _cer(reference_text, hyp, zh=zh_normalize)
