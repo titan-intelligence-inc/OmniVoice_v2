@@ -28,6 +28,9 @@ env/
 # --------------------------------------------------------------
 upstream/
 
+# SeedVC pulls its HF cache into ./checkpoints/ via HF_HUB_CACHE
+checkpoints/
+
 # --------------------------------------------------------------
 # Generated outputs and downloaded data (regeneratable)
 #   - outputs/ : per-phase experiment artefacts (wav, npz, json, md)

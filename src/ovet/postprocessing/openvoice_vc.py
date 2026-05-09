@@ -84,9 +84,18 @@ class OpenVoicePostVC:
                 f"OpenVoice v2 converter not found at {ckpt_root}. "
                 f"Expected: {config_path} and {ckpt_path}."
             )
-        self.converter = ToneColorConverter(
-            str(config_path), device=device, enable_watermark=enable_watermark,
-        )
+        # ToneColorConverter signature differs slightly between v1 and
+        # v2 — older constructor accepts ``enable_watermark`` kwarg,
+        # newer one doesn't. Handle both.
+        try:
+            self.converter = ToneColorConverter(
+                str(config_path), device=device,
+                enable_watermark=enable_watermark,
+            )
+        except TypeError:
+            self.converter = ToneColorConverter(
+                str(config_path), device=device,
+            )
         self.converter.load_ckpt(str(ckpt_path))
         self.ckpt_root = ckpt_root
         self.device = device
