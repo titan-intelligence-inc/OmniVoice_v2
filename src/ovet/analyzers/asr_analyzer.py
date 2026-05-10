@@ -136,6 +136,31 @@ class ASRAnalyzer:
         )
         return res["text"].strip()
 
+    def transcribe_batch(
+        self,
+        wav_paths: list[str | Path],
+        language: str | None = None,
+        *,
+        batch_size: int = 8,
+    ) -> list[str]:
+        """Batched Whisper transcription via HF pipeline.
+
+        Loads each wav to 16 kHz numpy and feeds the whole list to the
+        pipeline with ``batch_size``. The pipeline pads internally and
+        runs a single forward over the chunk-grouped batch.
+        """
+        self._ensure_loaded()
+        lang = self._LANG_HINT.get(language) if language else None
+        kwargs = {}
+        if lang:
+            kwargs["generate_kwargs"] = {"language": lang}
+        inputs = []
+        for p in wav_paths:
+            w, _ = load_wav(p, target_sr=16000)
+            inputs.append({"array": w.astype(np.float32), "sampling_rate": 16000})
+        results = self._pipe(inputs, batch_size=batch_size, **kwargs)
+        return [r["text"].strip() for r in results]
+
     def content_error(
         self,
         wav_path: str | Path,

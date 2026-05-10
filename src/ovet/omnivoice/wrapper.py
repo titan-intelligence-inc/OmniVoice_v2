@@ -191,3 +191,28 @@ class OmniVoiceWrapper:
         ):
             audios = self.model.generate(**kwargs)
         return audios[0]
+
+    def generate_batch(
+        self,
+        texts: list[str],
+        language: str,
+        ref_audio: str | Path,
+        ref_text: str | None = None,
+    ) -> list[np.ndarray]:
+        """Native-batched cloning: same ref for all items, varying text.
+
+        Uses OmniVoice's list-form ``generate()`` to share KV cache /
+        feature extraction work where possible. No steering path —
+        steering hooks would need per-batch composition which the
+        upstream model does not currently support.
+        """
+        if ref_text is None:
+            ref_text = self.transcribe(ref_audio, language=language)
+        n = len(texts)
+        audios = self.model.generate(
+            text=texts,
+            language=[language] * n,
+            ref_audio=[str(ref_audio)] * n,
+            ref_text=[ref_text] * n,
+        )
+        return list(audios)
